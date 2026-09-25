@@ -1,7 +1,12 @@
 name: Publish to npm
 
 # Publishes when a push to main carries a package.json version that is not yet on npm.
-# Bump `version` in package.json (PR → main) to release. Idempotent: re-runs are no-ops.
+# Bump `version` (PR → main) to release. Idempotent: re-runs are no-ops.
+#
+# Auth: npm Trusted Publishing (OIDC) — configure once on npmjs.com:
+#   package → Settings → Trusted Publisher → GitHub Actions
+#   owner: purpledevilai, repository: <this repo>, workflow: publish.yml
+# No NPM_TOKEN / secrets needed.
 on:
   push:
     branches: [main]
@@ -20,16 +25,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
 
+      - run: npm install -g npm@latest && npm --version
       - run: npm ci
       - run: npm run build
       - run: npm test --if-present
 
       - name: Publish if this version is new
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
