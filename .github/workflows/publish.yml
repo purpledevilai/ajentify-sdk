@@ -1,0 +1,43 @@
+name: Publish to npm
+
+# Publishes when a push to main carries a package.json version that is not yet on npm.
+# Bump `version` in package.json (PR → main) to release. Idempotent: re-runs are no-ops.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # npm provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test --if-present
+
+      - name: Publish if this version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$NAME@$VERSION already on npm — nothing to publish"
+            exit 0
+          fi
+          FLAGS="--access public"
+          if node -e "process.exit(require('./package.json').repository ? 0 : 1)"; then FLAGS="$FLAGS --provenance"; fi
+          npm publish $FLAGS
+          echo "::notice::published $NAME@$VERSION"

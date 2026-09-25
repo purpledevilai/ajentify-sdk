@@ -8,7 +8,7 @@
   "homepage": "https://ajentify.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ajentify/ajentify-sdk"
+    "url": "https://github.com/purpledevilai/ajentify-sdk"
   },
   "publishConfig": {
     "access": "public"
