@@ -1,6 +1,6 @@
 # @ajentify/sdk
 
-The official TypeScript SDK for the [Ajentify](https://ajentify.com) API. A clean, uniform wrapper over every Ajentify primitive — agents, contexts, tools, structured responses, data windows, API keys, JSON documents, and models — with Zod-first schemas and no `ParameterDefinition` / stage plumbing in sight.
+The official TypeScript SDK for the [Ajentify](https://ajentify.com) API. A clean, uniform wrapper over every Ajentify primitive — agents, contexts, tools, filesystems, structured responses, data windows, API keys, JSON documents, jobs and models — with Zod-first schemas and no `ParameterDefinition` / stage plumbing in sight.
 
 ```ts
 import { Agent, Context } from "@ajentify/sdk";
@@ -55,6 +55,7 @@ const agent = await aj.Agent.get(AGENT_ID);
 - **ID-pointer rule.** References between resources are always IDs: `Agent.create(name, prompt, toolIds)`, `Context.create(agentId, ...)`, `terminating.toolIds`. Every returned instance has an `.id`.
 - **Zod-first schemas.** Anywhere a schema is needed, pass a Zod schema (types are inferred) or a raw JSON Schema object. `ParameterDefinition`s are managed for you.
 - **CRUD is secondary.** You *can* create resources from the SDK, but most are authored in the dashboard or deployed via stages.
+- **One error type.** Everything fails as an `AjentifyError` (`status`, `code`, `body`); aborts and timeouts have `code: "aborted" | "timeout"`.
 
 ## Tools
 
@@ -77,6 +78,29 @@ await Tools.list();
 await Tools.defaults(); // built-in platform tools
 ```
 
+## MCP connections
+
+Connect to a remote MCP server and expose a chosen subset of its tools to agents.
+Connections are normally authored in the dashboard (which handles the OAuth flow),
+but you can also manage them from the SDK:
+
+```ts
+import { MCPConnection } from "@ajentify/sdk";
+
+const connection = await MCPConnection.create("Linear", "https://mcp.linear.app/mcp", {
+  requiresAuth: true,
+  accessToken,
+  refreshToken,
+  tokenEndpoint,
+  selectedTools: [
+    { name: "create_issue", description: "Create a Linear issue", inputSchema: {}, outputSchema: null },
+  ],
+});
+
+await MCPConnection.list();
+await connection.update({ selectedTools: [/* new subset */] });
+```
+
 ## Agents
 
 ```ts
@@ -85,6 +109,8 @@ import { Agent } from "@ajentify/sdk";
 const assistant = await Agent.create("Clinical Assistant", systemPrompt, [lookupPatient.id], {
   description: "Helps clinicians look up patients",
   modelId: "gpt-4o",
+  // MCP connections whose selected tools are exposed to the agent (ID-pointer rule).
+  mcpConnections: [connection.id],
 });
 ```
 
@@ -93,7 +119,11 @@ const assistant = await Agent.create("Clinical Assistant", systemPrompt, [lookup
 The context is where most of the action lives.
 
 ```ts
-const context = await Context.create(assistant.id, { userDefined: { accessToken } });
+const context = await Context.create(assistant.id, {
+  userDefined: { accessToken },
+  // Extra MCP connections on top of the agent's defaults (ID-pointer rule).
+  additionalMcpConnections: [connection.id],
+});
 
 // Add a human message and invoke (save defaults to true).
 const res = await context.addMessageAndInvoke("Look up patient 12345", {
@@ -141,9 +171,41 @@ const ctx = await Context.get(contextId);
 await ctx.addMessages(await db.loadDraft(contextId));
 ```
 
+### Long-running runs: strategies
+
+A single model turn can outlive the API's synchronous limit (~29 s) — an autonomous agent that researches the web for minutes, for example. Every invoke method takes a `strategy`:
+
+| `strategy` | What happens | Returns |
+|---|---|---|
+| `"sync"` (default) | One HTTP request stays open per turn. | `InvokeResponse` |
+| `"poll"` | Each turn is dispatched as a job (`Prefer: respond-async`) and the SDK polls `GET /job/{id}` until it finishes. The client-side tool loop runs as normal, through jobs. | `InvokeResponse` |
+| `"webhook"` | Dispatched as a job; the result is POSTed to `callbackUrl`. | `AsyncAck` |
+
+`poll` is the one to reach for from a server-side job runner. Bound the whole run with `signal`:
+
+```ts
+const context = await Context.create(TRACKER_AGENT_ID, { promptArgs: { ARG_COMPANY: "Acme" } });
+
+const result = await context.invoke({
+  strategy: "poll",
+  signal: AbortSignal.timeout(14 * 60_000), // the whole run: every turn, tool handler and poll
+  clientSideTools: {
+    add_alert: async ({ title, content }) => db.alerts.insert({ title, content }),
+    set_output: async ({ output }) => db.runs.update({ output }),
+  },
+});
+
+result.text;              // the agent's final message
+result.generatedMessages; // everything it said and every tool it called
+```
+
+When the signal fires the promise rejects with an `AjentifyError` whose `code` is `"timeout"` (or `"aborted"` for a manual abort). The agent's current turn keeps running server-side and whatever it generated is saved on the context, so you can always `Context.get(id)` afterwards to see how far it got.
+
+Jobs are also addressable directly — `Job.get(jobId)` / `Job.wait(jobId)` — and `createClient({ timeoutMs })` bounds each individual HTTP call.
+
 ### Async responses (callback URL)
 
-Agent invocations can exceed API Gateway's 30s timeout. Pass a `callbackUrl` to dispatch asynchronously — the call returns an `AsyncAck` immediately, and the result is POSTed to your URL when finished.
+The `webhook` strategy (implied by passing a `callbackUrl`) returns an `AsyncAck` immediately — `{ status, requestId, jobId }` — and the result is POSTed to your URL when finished.
 
 The callback boundary is deliberately **stateless**: once the callback fires, no in-memory SDK state carries over. Encode whatever you need to resume — most importantly the context id — into the callback URL, then reload it in your handler and continue.
 
@@ -172,7 +234,30 @@ if (ok) {
 }
 ```
 
-Because the callback resolves in a separate process, the auto client-side tool loop does not run for it — the raw payload may include `client_side_tool_calls` for you to handle after reloading the context (run them, then `ctx.submitToolResponses(...)`).
+Because the callback resolves in a separate process, the auto client-side tool loop does not run for it — the raw payload may include `client_side_tool_calls` for you to handle after reloading the context. `ctx.submitToolResponses(responses, { clientSideTools, strategy })` resumes the loop from there (or is a single round-trip without options).
+
+## Filesystems
+
+A filesystem is an org-scoped tree of folders and files that agents read and write through the built-in filesystem tools (`list_folder`, `open_file`, `create_file`, `edit_file`, …). Give an agent those tools and tell it where to work: agents address nodes by *tool paths* whose first segment is the filesystem id — `/<filesystem_id>/companies/acme` — which `fs.toolPath()` builds for you. The SDK methods accept either form.
+
+```ts
+import { Filesystem } from "@ajentify/sdk";
+
+const fs = await Filesystem.getOrCreate("Thunderhead", { description: "Competitor monitoring memory" });
+
+await fs.createFolder("/companies/acme", { description: "Acme Corp — monitoring notes" }); // parents created by default
+await fs.createFile("/companies/acme/README.md", "# Acme");
+await fs.writeFile("/companies/acme/README.md", "# Acme\nUpdated.");   // replace (creates if missing)
+await fs.readFile("/companies/acme/README.md");
+await fs.get("/companies");                                            // folder with children, or file with content
+await fs.move("/companies/acme", "/companies/acme-corp");
+await fs.remove("/companies/acme-corp", { recursive: true });
+await fs.search("pricing", { scope: "content" });
+await fs.tree();
+
+// Hand the agent its working folder as a prompt argument:
+await Context.create(agent.id, { promptArgs: { ARG_FOLDER: fs.toolPath("/companies/acme") } });
+```
 
 ## Structured responses
 
@@ -199,12 +284,16 @@ const { answer } = await StructuredResponse.run({
 ## Other resources
 
 ```ts
-import { DataWindow, ApiKey, JsonDocument, Models } from "@ajentify/sdk";
+import { DataWindow, ApiKey, Client, JsonDocument, Models } from "@ajentify/sdk";
 
 await DataWindow.create("kb", "knowledge base text");
 
 const key = await ApiKey.generate();      // key.token is returned once
 await ApiKey.list();
+
+const endUser = await Client.create();    // server-minted client_id, no context
+await Context.create(agent.id, { clientId: endUser.id });
+await ApiKey.generate({ type: "client", clientId: endUser.id });
 
 const doc = await JsonDocument.create("config", { featureFlags: {} });
 await doc.setValue("featureFlags.beta", true);

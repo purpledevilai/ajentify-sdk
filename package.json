@@ -1,7 +1,7 @@
 {
   "name": "@ajentify/sdk",
-  "version": "0.1.0",
-  "description": "Official TypeScript SDK for the Ajentify API. A clean, uniform wrapper over agents, contexts, tools, structured responses, data windows, API keys, JSON documents and models with Zod-first schemas.",
+  "version": "0.2.0",
+  "description": "Official TypeScript SDK for the Ajentify API. A clean, uniform wrapper over agents, contexts, tools, filesystems, structured responses, data windows, API keys, JSON documents, jobs and models with Zod-first schemas.",
   "type": "module",
   "license": "MIT",
   "author": "Ajentify",

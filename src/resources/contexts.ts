@@ -1,5 +1,8 @@
 import type { AjentifyClient } from "../client.js";
+import { abortedError } from "../client.js";
+import { AjentifyError } from "../errors.js";
 import type { GetClient } from "../internal.js";
+import { waitForJob } from "./jobs.js";
 import {
   serializeToolResult,
   type AsyncAck,
@@ -27,6 +30,8 @@ export interface ContextCreateOptions {
   userDefined?: Record<string, unknown>;
   /** Extra tool ids to make available on top of the agent's tools (ID-pointer rule). */
   additionalTools?: string[];
+  /** Extra MCP connection ids whose selected tools to make available on top of the agent's (ID-pointer rule). */
+  additionalMcpConnections?: string[];
   /** Client scoping id. */
   clientId?: string;
   /** Time-to-live in days. */
@@ -51,6 +56,20 @@ export interface TerminatingConfig {
   maxInvocations?: number;
 }
 
+/**
+ * How an invocation waits for the agent.
+ *
+ * - `"sync"` (default) — one HTTP request stays open per model turn. Simple, but
+ *   each turn is capped by the API's synchronous limit (~29 s).
+ * - `"poll"` — each turn is dispatched as a job (`Prefer: respond-async`) and the
+ *   SDK polls `GET /job/{id}` until it finishes. Use for long-running / autonomous
+ *   runs; combine with `signal` to bound the whole run.
+ * - `"webhook"` — dispatched as a job and the result is POSTed to `callbackUrl`;
+ *   the call returns an `AsyncAck` immediately. The client-side tool loop does
+ *   not run in this mode (see `parseCallback`).
+ */
+export type InvokeStrategy = "sync" | "poll" | "webhook";
+
 export interface InvokeOptions {
   /** Map of client-side tool name -> handler, run during the auto loop. */
   clientSideTools?: ClientSideToolMap;
@@ -60,7 +79,21 @@ export interface InvokeOptions {
   save?: boolean;
   /** Autonomous-run terminating configuration. */
   terminating?: TerminatingConfig;
-  /** Dispatch asynchronously; results are POSTed to this URL. Returns an AsyncAck. */
+  /**
+   * How to wait for the agent. Defaults to `"sync"`, or `"webhook"` when a
+   * `callbackUrl` is given.
+   */
+  strategy?: InvokeStrategy;
+  /** `poll` strategy: milliseconds between job polls. Defaults to 2000. */
+  pollIntervalMs?: number;
+  /**
+   * Abort the whole invocation — the current request, the client-side tool loop
+   * and any job polling. Typically `AbortSignal.timeout(ms)`. Rejects with an
+   * `AjentifyError` whose `code` is `"timeout"` or `"aborted"`. Note the agent's
+   * current turn keeps running server-side; messages generated so far are saved.
+   */
+  signal?: AbortSignal;
+  /** `webhook` strategy: results are POSTed to this URL. Returns an AsyncAck. */
   callbackUrl?: string;
   /** Forwarded as the Authorization header on the callback POST. */
   callbackToken?: string;
@@ -164,8 +197,16 @@ export interface Context {
     options?: InvokeOptions,
   ): Promise<InvokeResponse>;
 
-  /** Manually submit client-side tool results (single round-trip). */
-  submitToolResponses(responses: ClientSideToolResponse[]): Promise<InvokeResponse>;
+  /**
+   * Submit client-side tool results and continue the agent. With `options`
+   * (e.g. `clientSideTools`, `strategy`) the auto loop resumes from here;
+   * without them it is a single round-trip and the result may again
+   * `needsClientSideTools`.
+   */
+  submitToolResponses(
+    responses: ClientSideToolResponse[],
+    options?: Omit<InvokeOptions, "save" | "callbackUrl" | "callbackToken" | "requestId">,
+  ): Promise<InvokeResponse>;
 
   /** Append messages to the context (e.g. commit an approved draft). */
   addMessages(messages: Message[]): Promise<Context>;
@@ -274,16 +315,20 @@ class ContextImpl implements Context {
     return this.dispatch("/chat/add-ai-message", body, options ?? {});
   }
 
-  async submitToolResponses(responses: ClientSideToolResponse[]): Promise<InvokeResponse> {
+  async submitToolResponses(
+    responses: ClientSideToolResponse[],
+    options: Omit<InvokeOptions, "save" | "callbackUrl" | "callbackToken" | "requestId"> = {},
+  ): Promise<InvokeResponse> {
     const wire = responses.map((r) => ({
       tool_call_id: r.toolCallId,
       response: serializeToolResult(r.response),
     }));
-    const resp = await this.client.post<WireChatResponse>("/chat/client-side-tool-responses", {
-      context_id: this.id,
-      tool_responses: wire,
-    });
-    return buildInvokeResponse(resp, resp.generated_messages, resp.invocation_cost ?? 0);
+    const resp = await this.turn(
+      "/chat/client-side-tool-responses",
+      { context_id: this.id, tool_responses: wire },
+      options,
+    );
+    return this.runClientLoop(resp, options);
   }
 
   async addMessages(messages: Message[]): Promise<Context> {
@@ -326,24 +371,63 @@ class ContextImpl implements Context {
     const payload = { ...body };
     if (options.terminating) payload.terminating_config = toWireTerminating(options.terminating);
 
-    if (options.callbackUrl) {
+    const strategy = resolveStrategy(options);
+    if (strategy === "webhook") {
+      if (!options.callbackUrl) {
+        throw new AjentifyError('The "webhook" strategy requires a callbackUrl.');
+      }
       const ack = await this.client.post<WireAsyncAck>(path, payload, {
         callback: {
           url: options.callbackUrl,
           token: options.callbackToken,
           requestId: options.requestId,
         },
+        signal: options.signal,
       });
-      return { status: "processing", requestId: ack.request_id };
+      return { status: "processing", requestId: ack.request_id, jobId: ack.job_id ?? null };
     }
 
-    const first = await this.client.post<WireChatResponse>(path, payload);
+    const first = await this.turn(path, payload, options);
     return this.runClientLoop(first, options);
+  }
+
+  /**
+   * Run one model turn and return its ChatResponse, honouring the strategy:
+   * `sync` keeps the request open; `poll` asks for a job and waits on it (and
+   * transparently accepts a 200 if the route answered synchronously anyway).
+   */
+  private async turn(
+    path: string,
+    payload: Record<string, unknown>,
+    options: Pick<InvokeOptions, "strategy" | "pollIntervalMs" | "signal" | "callbackUrl">,
+  ): Promise<WireChatResponse> {
+    const signal = options.signal;
+    if (resolveStrategy(options) !== "poll") {
+      return this.client.post<WireChatResponse>(path, payload, { signal });
+    }
+    const { status, data } = await this.client.requestWithStatus<WireChatResponse | WireAsyncAck>(
+      "POST",
+      path,
+      { body: payload, preferAsync: true, signal },
+    );
+    if (status !== 202) return data as WireChatResponse;
+    const ack = data as WireAsyncAck;
+    if (!ack.job_id) {
+      throw new AjentifyError(`Async dispatch of ${path} returned no job_id`, { status, body: data });
+    }
+    const job = await waitForJob<WireChatResponse>(this.client, ack.job_id, {
+      intervalMs: options.pollIntervalMs,
+      signal,
+    });
+    if (!job.result) {
+      throw new AjentifyError(`Job ${job.id} completed without a result`, { code: "job_no_result", body: job });
+    }
+    return job.result;
   }
 
   private async runClientLoop(
     first: WireChatResponse,
-    options: InvokeOptions,
+    options: Omit<InvokeOptions, "save" | "callbackUrl" | "callbackToken" | "requestId">,
   ): Promise<InvokeResponse> {
     const handlers = options.clientSideTools ?? {};
     const exitOn = new Set(options.exitOn ?? []);
@@ -361,6 +445,7 @@ class ContextImpl implements Context {
 
       const toolResponses: { tool_call_id: string; response: string }[] = [];
       for (const call of calls) {
+        if (options.signal?.aborted) throw abortedError("POST", "/chat/client-side-tool-responses", options.signal);
         const handler = handlers[call.tool_name]!;
         const out = await handler(call.tool_input, {
           contextId: this.id,
@@ -374,16 +459,22 @@ class ContextImpl implements Context {
         });
       }
 
-      current = await this.client.post<WireChatResponse>("/chat/client-side-tool-responses", {
-        context_id: this.id,
-        tool_responses: toolResponses,
-      });
+      current = await this.turn(
+        "/chat/client-side-tool-responses",
+        { context_id: this.id, tool_responses: toolResponses },
+        options,
+      );
       generated.push(...(current.generated_messages ?? []));
       cost += current.invocation_cost ?? 0;
     }
 
     return buildInvokeResponse(current, generated, cost);
   }
+}
+
+function resolveStrategy(options: Pick<InvokeOptions, "strategy" | "callbackUrl">): InvokeStrategy {
+  if (options.strategy) return options.strategy;
+  return options.callbackUrl ? "webhook" : "sync";
 }
 
 export interface ContextApi {
@@ -402,6 +493,8 @@ export function createContextApi(getClient: GetClient): ContextApi {
       if (options.promptArgs !== undefined) body.prompt_args = options.promptArgs;
       if (options.userDefined !== undefined) body.user_defined = options.userDefined;
       if (options.additionalTools !== undefined) body.additional_agent_tools = options.additionalTools;
+      if (options.additionalMcpConnections !== undefined)
+        body.additional_mcp_connections = options.additionalMcpConnections;
       if (options.clientId !== undefined) body.client_id = options.clientId;
       if (options.ttlDays !== undefined) body.ttl_days = options.ttlDays;
       if (options.invokeFirst !== undefined) body.invoke_agent_message = options.invokeFirst;

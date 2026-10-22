@@ -24,6 +24,8 @@ export interface AgentCreateOptions {
   voiceId?: string | null;
   realtimeVoice?: RealtimeVoice | null;
   initializeToolId?: string | null;
+  /** IDs of MCP connections whose selected tools to expose to this agent. */
+  mcpConnections?: string[];
   orgId?: string;
 }
 
@@ -32,6 +34,8 @@ export interface AgentUpdateOptions {
   description?: string;
   prompt?: string;
   toolIds?: string[];
+  /** IDs of MCP connections whose selected tools to expose to this agent. */
+  mcpConnections?: string[];
   isPublic?: boolean;
   modelId?: string;
   agentSpeaksFirst?: boolean;
@@ -53,6 +57,8 @@ export interface Agent {
   readonly agentSpeaksFirst: boolean;
   /** IDs of the tools attached to this agent (ID-pointer rule). */
   readonly toolIds: string[];
+  /** IDs of the MCP connections attached to this agent (ID-pointer rule). */
+  readonly mcpConnections: string[];
   readonly usesPromptArgs: boolean;
   readonly promptArgNames: string[];
   readonly voiceId: string | null;
@@ -79,6 +85,7 @@ class AgentImpl implements Agent {
   readonly isDefaultAgent: boolean;
   readonly agentSpeaksFirst: boolean;
   readonly toolIds: string[];
+  readonly mcpConnections: string[];
   readonly usesPromptArgs: boolean;
   readonly promptArgNames: string[];
   readonly voiceId: string | null;
@@ -103,6 +110,7 @@ class AgentImpl implements Agent {
     this.isDefaultAgent = data.is_default_agent;
     this.agentSpeaksFirst = data.agent_speaks_first ?? false;
     this.toolIds = data.tools ?? [];
+    this.mcpConnections = data.mcp_connections ?? [];
     this.usesPromptArgs = data.uses_prompt_args ?? false;
     this.promptArgNames = data.prompt_arg_names ?? [];
     this.voiceId = data.voice_id ?? null;
@@ -121,6 +129,7 @@ class AgentImpl implements Agent {
     if (options.description !== undefined) body.agent_description = options.description;
     if (options.prompt !== undefined) body.prompt = options.prompt;
     if (options.toolIds !== undefined) body.tools = options.toolIds;
+    if (options.mcpConnections !== undefined) body.mcp_connections = options.mcpConnections;
     if (options.isPublic !== undefined) body.is_public = options.isPublic;
     if (options.modelId !== undefined) body.model_id = options.modelId;
     if (options.agentSpeaksFirst !== undefined) body.agent_speaks_first = options.agentSpeaksFirst;
@@ -180,6 +189,7 @@ export function createAgentApi(getClient: GetClient): AgentApi {
       is_public: options.isPublic ?? false,
       tools: toolIds,
     };
+    if (options.mcpConnections !== undefined) body.mcp_connections = options.mcpConnections;
     if (options.orgId !== undefined) body.org_id = options.orgId;
     if (options.modelId !== undefined) body.model_id = options.modelId;
     if (options.agentSpeaksFirst !== undefined) body.agent_speaks_first = options.agentSpeaksFirst;

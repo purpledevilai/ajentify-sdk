@@ -137,14 +137,14 @@ describe("Context", () => {
   it("returns an AsyncAck (and sets callback headers) when callbackUrl is given", async () => {
     const { Context, calls } = sdk((call) => {
       if (call.path === "/context") return { body: context };
-      return { status: 202, body: { status: "processing", request_id: "req-1" } };
+      return { status: 202, body: { job_id: "job-1", status: "queued", request_id: "req-1", poll_url: "/job/job-1" } };
     });
     const ctx = await Context.create("a1");
     const ack = await ctx.addMessageAndInvoke("hello", {
       callbackUrl: "https://myapp.com/cb",
       callbackToken: "shh",
     });
-    expect(ack).toEqual({ status: "processing", requestId: "req-1" });
+    expect(ack).toEqual({ status: "processing", requestId: "req-1", jobId: "job-1" });
     const chat = calls.find((c) => c.path === "/chat")!;
     expect(chat.headers["Callback-URL"]).toBe("https://myapp.com/cb");
     expect(chat.headers["Callback-Token"]).toBe("shh");

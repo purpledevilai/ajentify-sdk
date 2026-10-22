@@ -46,10 +46,15 @@ export type ClientSideToolHandler = (
 /** Map of client-side tool name -> handler, supplied to invoke methods. */
 export type ClientSideToolMap = Record<string, ClientSideToolHandler>;
 
-/** Acknowledgement returned when an invoke is dispatched with a `callbackUrl`. */
+/**
+ * Acknowledgement returned when an invoke is dispatched with the `webhook`
+ * strategy (`callbackUrl`). The result is POSTed to your URL; `jobId` lets you
+ * also inspect it with `Job.get(jobId)` / `Job.wait(jobId)` in the meantime.
+ */
 export interface AsyncAck {
   status: "processing";
   requestId: string;
+  jobId: string | null;
 }
 
 /** Serialize a tool handler's return value to the string the API expects. */

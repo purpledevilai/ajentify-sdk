@@ -69,6 +69,29 @@ describe("ApiKey", () => {
   });
 });
 
+describe("Client", () => {
+  it("creates a client with a server-minted id", async () => {
+    const { fetch, calls } = mockFetch(() => ({
+      body: { client_id: "c1", org_id: "o1", created_at: 1 },
+    }));
+    const { Client } = createClient({ apiKey: "k", baseUrl: "https://api.test", fetch });
+    const c = await Client.create();
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.path).toBe("/client");
+    expect(calls[0]!.body).toEqual({});
+    expect(c).toEqual({ id: "c1", orgId: "o1", createdAt: 1 });
+  });
+
+  it("passes org_id when given", async () => {
+    const { fetch, calls } = mockFetch(() => ({
+      body: { client_id: "c1", org_id: "o2", created_at: 1 },
+    }));
+    const { Client } = createClient({ apiKey: "k", baseUrl: "https://api.test", fetch });
+    await Client.create({ orgId: "o2" });
+    expect(calls[0]!.body).toEqual({ org_id: "o2" });
+  });
+});
+
 describe("JsonDocument", () => {
   it("creates a document and sets a value with an inferred type", async () => {
     const doc = {
