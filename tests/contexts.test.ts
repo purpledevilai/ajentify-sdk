@@ -35,6 +35,18 @@ describe("Context", () => {
     expect(ctx.userDefined).toEqual({ accessToken: "tok" });
   });
 
+  it("get/refresh send with_tool_calls and the optional tool_output_max_chars / client_id", async () => {
+    const { Context, calls } = sdk(() => ({ body: context }));
+    await Context.get("ctx1");
+    expect(calls[0]!.query.get("with_tool_calls")).toBe("true");
+    expect(calls[0]!.query.has("tool_output_max_chars")).toBe(false);
+    const ctx = await Context.get("ctx1", { clientId: "c9", toolOutputMaxChars: 0 });
+    expect(calls[1]!.query.get("client_id")).toBe("c9");
+    expect(calls[1]!.query.get("tool_output_max_chars")).toBe("0");
+    await ctx.refresh({ toolOutputMaxChars: 500 });
+    expect(calls[2]!.query.get("tool_output_max_chars")).toBe("500");
+  });
+
   it("addMessageAndInvoke returns an InvokeResponse", async () => {
     const { Context } = sdk((call) => {
       if (call.path === "/context") return { body: context };

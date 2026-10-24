@@ -119,6 +119,33 @@ describe("poll strategy", () => {
     expect(err.message).toBe("insufficient balance");
   });
 
+  it("surfaces a completed job with no result using the job's error (result_too_large)", async () => {
+    const { Context } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      if (call.path === "/chat/invoke") return { status: 202, body: { job_id: "j", status: "queued", request_id: "r" } };
+      return {
+        body: {
+          job_id: "j", status: "completed", result: null,
+          error: { status_code: 200, message: "Result exceeds 350 KB; call the synchronous route to fetch it", code: "result_too_large" },
+        },
+      };
+    });
+    const ctx = await Context.create("a1");
+    const err = await ctx.invoke({ strategy: "poll", pollIntervalMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(AjentifyError);
+    expect(err.code).toBe("result_too_large");
+    expect(err.message).toContain("Result exceeds 350 KB");
+
+    const { Context: C2 } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      if (call.path === "/chat/invoke") return { status: 202, body: { job_id: "j", status: "queued", request_id: "r" } };
+      return { body: { job_id: "j", status: "completed", result: null } };
+    });
+    const ctx2 = await C2.create("a1");
+    const err2 = await ctx2.invoke({ strategy: "poll", pollIntervalMs: 1 }).catch((e) => e);
+    expect(err2.code).toBe("job_no_result");
+  });
+
   it("stops polling when the signal fires and rejects with code timeout", async () => {
     let polls = 0;
     const { Context } = sdk((call) => {

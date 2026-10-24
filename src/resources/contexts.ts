@@ -213,7 +213,7 @@ export interface Context {
   /** Replace the entire message stack. */
   setMessages(messages: Message[]): Promise<Context>;
   /** Re-fetch the context (including tool calls) and update cached state. */
-  refresh(): Promise<Context>;
+  refresh(options?: ContextGetOptions): Promise<Context>;
   /** Delete the context. */
   delete(): Promise<void>;
 }
@@ -349,9 +349,9 @@ class ContextImpl implements Context {
     return this;
   }
 
-  async refresh(): Promise<Context> {
+  async refresh(options?: ContextGetOptions): Promise<Context> {
     const updated = await this.client.get<ApiContext>(`/context/${this.id}`, {
-      query: { with_tool_calls: true },
+      query: contextGetQuery(options),
     });
     this.hydrate(updated);
     return this;
@@ -420,7 +420,13 @@ class ContextImpl implements Context {
       signal,
     });
     if (!job.result) {
-      throw new AjentifyError(`Job ${job.id} completed without a result`, { code: "job_no_result", body: job });
+      // A completed job with no result carries the reason in job.error (e.g. result_too_large:
+      // the response exceeded the job row cap). Surface that instead of a generic failure.
+      const reason = job.error;
+      throw new AjentifyError(
+        reason?.message ? `Job ${job.id} completed without a result: ${reason.message}` : `Job ${job.id} completed without a result`,
+        { status: reason?.statusCode, code: reason?.code ?? "job_no_result", body: job },
+      );
     }
     return job.result;
   }
@@ -477,9 +483,27 @@ function resolveStrategy(options: Pick<InvokeOptions, "strategy" | "callbackUrl"
   return options.callbackUrl ? "webhook" : "sync";
 }
 
+export interface ContextGetOptions {
+  /** Org-API-key proxies: assert the context belongs to this client (404 otherwise). */
+  clientId?: string;
+  /**
+   * Per-message cap on `tool_output` in the returned messages. The API returns 8 000-character
+   * previews by default (ending in a `[TOOL OUTPUT TRIMMED: …]` marker); pass `0` for the full
+   * stored outputs.
+   */
+  toolOutputMaxChars?: number;
+}
+
+function contextGetQuery(options?: ContextGetOptions): Record<string, string | number | boolean> {
+  const query: Record<string, string | number | boolean> = { with_tool_calls: true };
+  if (options?.clientId) query.client_id = options.clientId;
+  if (options?.toolOutputMaxChars !== undefined) query.tool_output_max_chars = options.toolOutputMaxChars;
+  return query;
+}
+
 export interface ContextApi {
   create(agentId: string, options?: ContextCreateOptions): Promise<Context>;
-  get(contextId: string, options?: { clientId?: string }): Promise<Context>;
+  get(contextId: string, options?: ContextGetOptions): Promise<Context>;
   list(
     options?: ContextListOptions,
   ): Promise<{ contexts: ApiOrgContextSummary[]; nextCursor: string | null }>;
@@ -504,9 +528,7 @@ export function createContextApi(getClient: GetClient): ContextApi {
 
     async get(contextId, options) {
       const client = getClient();
-      const query: Record<string, string | boolean> = { with_tool_calls: true };
-      if (options?.clientId) query.client_id = options.clientId;
-      const context = await client.get<ApiContext>(`/context/${contextId}`, { query });
+      const context = await client.get<ApiContext>(`/context/${contextId}`, { query: contextGetQuery(options) });
       return new ContextImpl(client, context);
     },
 

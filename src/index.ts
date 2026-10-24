@@ -169,6 +169,7 @@ export type {
 export type {
   ContextApi,
   ContextCreateOptions,
+  ContextGetOptions,
   ContextListOptions,
   InvokeOptions,
   InvokeStrategy,
