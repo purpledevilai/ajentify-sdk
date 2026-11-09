@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createClient, InvokeResponse, parseCallback } from "../src/index.js";
-import { mockFetch, type MockCall } from "./helpers.js";
+import { invoked, mockFetch, type MockCall } from "./helpers.js";
 
 const context = {
   context_id: "ctx1",
@@ -61,7 +61,7 @@ describe("Context", () => {
       };
     });
     const ctx = await Context.create("a1");
-    const res = await ctx.addMessageAndInvoke("hello");
+    const res = invoked(await ctx.addMessageAndInvoke("hello"));
     expect(res).toBeInstanceOf(InvokeResponse);
     expect(res.text).toBe("hi there");
     expect(res.saved).toBe(true);
@@ -99,9 +99,9 @@ describe("Context", () => {
     });
 
     const ctx = await Context.create("a1");
-    const res = await ctx.addMessageAndInvoke("check patient 42", {
+    const res = invoked(await ctx.addMessageAndInvoke("check patient 42", {
       clientSideTools: { lookupPatient: handler },
-    });
+    }));
 
     expect(handler).toHaveBeenCalledWith(
       { mrn: "42" },
@@ -135,10 +135,10 @@ describe("Context", () => {
     });
 
     const ctx = await Context.create("a1");
-    const res = await ctx.addMessageAndInvoke("pay", {
+    const res = invoked(await ctx.addMessageAndInvoke("pay", {
       clientSideTools: { needsApproval: handler },
       exitOn: ["needsApproval"],
-    });
+    }));
 
     expect(handler).not.toHaveBeenCalled();
     expect(res.clientSideToolCalls).toHaveLength(1);
@@ -181,13 +181,50 @@ describe("Context", () => {
     });
 
     const ctx = await Context.create("a1");
-    const draft = await ctx.addMessageAndInvoke("write reply", { save: false });
+    const draft = invoked(await ctx.addMessageAndInvoke("write reply", { save: false }));
     expect((calls.find((c) => c.path === "/chat")!.body as Record<string, unknown>).save_ai_messages).toBe(false);
     expect(draft.saved).toBe(false);
 
     await ctx.addMessages(draft.generatedMessages);
     const add = calls.find((c) => c.path === "/context/add-messages")!;
     expect((add.body as { messages: unknown[] }).messages).toEqual(generated);
+  });
+});
+
+describe("asyncToolResponse", () => {
+  const ack = { status: "triggered", item_id: "1783000000000-item" };
+
+  it("Context.asyncToolResponse posts to /async-tool-response and maps the ack", async () => {
+    const { Context, calls } = sdk(() => ({ body: ack }));
+    const res = await Context.asyncToolResponse("ctx1", {
+      toolCallId: "call_abc",
+      response: "Approved by admin.",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.path).toBe("/async-tool-response");
+    expect(calls[0]!.body).toEqual({
+      context_id: "ctx1",
+      tool_call_id: "call_abc",
+      response: "Approved by admin.",
+    });
+    expect(res).toEqual({ status: "triggered", itemId: "1783000000000-item" });
+  });
+
+  it("context.asyncToolResponse uses the instance id and JSON-stringifies non-string responses", async () => {
+    const { Context, calls } = sdk((call) => (call.path === "/context" ? { body: context } : { body: ack }));
+    const ctx = await Context.create("a1");
+    const res = await ctx.asyncToolResponse({ toolCallId: "call_1", response: { approved: true, by: "kim" } });
+    const post = calls.find((c) => c.path === "/async-tool-response")!;
+    expect(post.body).toEqual({
+      context_id: "ctx1",
+      tool_call_id: "call_1",
+      response: JSON.stringify({ approved: true, by: "kim" }),
+    });
+    expect(res.status).toBe("triggered");
+    expect(res.itemId).toBe("1783000000000-item");
+    // No re-invoke: the API runs the context itself.
+    expect(calls.some((c) => c.path.startsWith("/chat"))).toBe(false);
   });
 });
 

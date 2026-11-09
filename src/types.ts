@@ -352,6 +352,24 @@ export interface WireAsyncAck extends Partial<ApiJob> {
   poll_url?: string;
 }
 
+/**
+ * The 202 body of a chat route whose context is being run by someone else: the input was
+ * queued on the context's inbox and the current run holder will apply it. Also the job
+ * `result` when such a route ran as an async job.
+ */
+export interface WireQueuedResponse {
+  status: "queued";
+  /** `null` for `/chat/invoke`, which queues nothing. */
+  item_id: string | null;
+  context_id: string;
+}
+
+/** The 200 body of `POST /async-tool-response`. */
+export interface WireAsyncToolResponseAck {
+  status: "triggered";
+  item_id: string;
+}
+
 export interface ApiJobError {
   status_code: number;
   message: string;

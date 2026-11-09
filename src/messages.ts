@@ -57,6 +57,51 @@ export interface AsyncAck {
   jobId: string | null;
 }
 
+/**
+ * Returned (instead of an `InvokeResponse`) when the context was being run by
+ * someone else at the moment of the call — a concurrent `/chat`, a live chat
+ * session, a schedule or a sub-agent reply. Your input is NOT lost: it was queued
+ * on the context's inbox and the current run applies it (and generates the
+ * agent's reply) before it finishes. Check back with `Context.get(contextId)`.
+ *
+ * Surfaced by every invoke method for the `sync` strategy (HTTP 202) and the
+ * `poll` strategy (job result `{ status: "queued" }`). Narrow with `isQueued()`.
+ */
+export interface QueuedResponse {
+  status: "queued";
+  /** The inbox item holding your input. `null` for `invoke()`, which queues nothing. */
+  itemId: string | null;
+  contextId: string;
+}
+
+/** Type guard: true when an invoke result is a `QueuedResponse` rather than an `InvokeResponse`. */
+export function isQueued(result: unknown): result is QueuedResponse {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { status?: unknown }).status === "queued" &&
+    typeof (result as { contextId?: unknown }).contextId === "string"
+  );
+}
+
+/** A response to an async tool call, delivered via `/async-tool-response`. */
+export interface AsyncToolResponse {
+  toolCallId: string;
+  /** String or any JSON-serializable value (objects are JSON-stringified). */
+  response: unknown;
+}
+
+/**
+ * Acknowledgement of `asyncToolResponse()`: the response is queued on the
+ * context's inbox and a run of the context has been started to process it (or,
+ * if the context is already running, that run picks it up before finishing).
+ */
+export interface AsyncToolResponseAck {
+  status: "triggered";
+  /** Inbox item id of the queued response. */
+  itemId: string;
+}
+
 /** Serialize a tool handler's return value to the string the API expects. */
 export function serializeToolResult(value: unknown): string {
   if (typeof value === "string") return value;

@@ -1,6 +1,7 @@
 import { AjentifyClient, type AjentifyClientOptions } from "./client.js";
 import { configure, getDefaultClient } from "./config.js";
 import type { GetClient } from "./internal.js";
+import { isQueued as isQueuedImpl } from "./messages.js";
 
 import {
   createAgentApi,
@@ -106,6 +107,9 @@ export const Filesystem = createFilesystemApi(getDefaultClient);
 /** Parse an async callback POST body into a structured result. */
 export const parseCallback = parseCallbackImpl;
 
+/** Type guard: did an invoke resolve to a `QueuedResponse` (context busy, input queued)? */
+export const isQueued = isQueuedImpl;
+
 // Merge the instance type names with the namespace value names above so that
 // `Agent.create()` (value) and `const a: Agent` (type) both work.
 export type Agent = AgentInstance;
@@ -131,6 +135,7 @@ export const AJ = {
   Job,
   Filesystem,
   parseCallback,
+  isQueued,
   configure,
   createClient,
 };
@@ -158,6 +163,9 @@ export type {
   ClientSideToolMap,
   ClientToolContext,
   AsyncAck,
+  QueuedResponse,
+  AsyncToolResponse,
+  AsyncToolResponseAck,
 } from "./messages.js";
 
 export type {
@@ -172,6 +180,7 @@ export type {
   ContextGetOptions,
   ContextListOptions,
   InvokeOptions,
+  InvokeResult,
   InvokeStrategy,
   TerminatingConfig,
   CallbackResult,
