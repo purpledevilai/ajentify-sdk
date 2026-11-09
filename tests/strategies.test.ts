@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { AjentifyError, createClient } from "../src/index.js";
-import { mockFetch, type MockCall } from "./helpers.js";
+import { AjentifyError, createClient, InvokeResponse, isQueued } from "../src/index.js";
+import { invoked, mockFetch, type MockCall } from "./helpers.js";
 
 const context = {
   context_id: "ctx1",
@@ -69,11 +69,11 @@ describe("poll strategy", () => {
     });
 
     const ctx = await Context.create("a1");
-    const res = await ctx.invoke({
+    const res = invoked(await ctx.invoke({
       strategy: "poll",
       pollIntervalMs: 1,
       clientSideTools: { add_alert: addAlert },
-    });
+    }));
 
     expect(res.text).toBe("done");
     expect(res.cost).toBeCloseTo(0.3);
@@ -98,7 +98,7 @@ describe("poll strategy", () => {
       return { body: chat({ response: "sync answer" }) };
     });
     const ctx = await Context.create("a1");
-    const res = await ctx.addMessageAndInvoke("hi", { strategy: "poll" });
+    const res = invoked(await ctx.addMessageAndInvoke("hi", { strategy: "poll" }));
     expect(res.text).toBe("sync answer");
     expect(calls.some((c) => c.path.startsWith("/job/"))).toBe(false);
   });
@@ -206,9 +206,9 @@ describe("submitToolResponses", () => {
       return { body: chat({ response: "final" }) };
     });
     const ctx = await Context.create("a1");
-    const res = await ctx.submitToolResponses([{ toolCallId: "c1", response: "ok" }], {
+    const res = invoked(await ctx.submitToolResponses([{ toolCallId: "c1", response: "ok" }], {
       clientSideTools: { set_output: async () => "saved" },
-    });
+    }));
     expect(res.text).toBe("final");
     expect(calls.filter((c) => c.path === "/chat/client-side-tool-responses")).toHaveLength(2);
   });
@@ -219,9 +219,130 @@ describe("submitToolResponses", () => {
       return { body: chat({ client_side_tool_calls: [{ tool_call_id: "c2", tool_name: "set_output", tool_input: {} }] }) };
     });
     const ctx = await Context.create("a1");
-    const res = await ctx.submitToolResponses([{ toolCallId: "c1", response: "ok" }]);
+    const res = invoked(await ctx.submitToolResponses([{ toolCallId: "c1", response: "ok" }]));
     expect(res.needsClientSideTools).toBe(true);
     expect(calls.filter((c) => c.path === "/chat/client-side-tool-responses")).toHaveLength(1);
+  });
+});
+
+describe("queued responses (context busy)", () => {
+  const queued = (over: Record<string, unknown> = {}) => ({
+    status: "queued",
+    item_id: "item-1",
+    context_id: "ctx1",
+    ...over,
+  });
+
+  it("sync: a 202 from /chat resolves to a QueuedResponse instead of throwing", async () => {
+    const { Context, calls } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      if (call.path === "/chat") return { status: 202, body: queued() };
+      throw new Error(`unexpected ${call.path}`);
+    });
+    const ctx = await Context.create("a1");
+    const res = await ctx.addMessageAndInvoke("hello");
+    expect(isQueued(res)).toBe(true);
+    expect(res).not.toBeInstanceOf(InvokeResponse);
+    expect(res).toEqual({ status: "queued", itemId: "item-1", contextId: "ctx1" });
+    // No Prefer / callback headers on the sync path.
+    const chat = calls.find((c) => c.path === "/chat")!;
+    expect(chat.headers["Prefer"]).toBeUndefined();
+  });
+
+  it("sync: /chat/invoke's 202 carries item_id: null", async () => {
+    const { Context } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      return { status: 202, body: queued({ item_id: null }) };
+    });
+    const ctx = await Context.create("a1");
+    const res = await ctx.invoke();
+    expect(isQueued(res)).toBe(true);
+    if (isQueued(res)) expect(res.itemId).toBeNull();
+  });
+
+  it("sync: addAiMessage and submitToolResponses surface a 202 the same way", async () => {
+    const { Context, calls } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      return { status: 202, body: queued({ item_id: `item-${call.path}` }) };
+    });
+    const ctx = await Context.create("a1");
+    const a = await ctx.addAiMessage("Noted.");
+    expect(a).toEqual({ status: "queued", itemId: "item-/chat/add-ai-message", contextId: "ctx1" });
+    const b = await ctx.submitToolResponses([{ toolCallId: "c1", response: "ok" }], {
+      clientSideTools: { never: async () => "x" },
+    });
+    expect(b).toEqual({ status: "queued", itemId: "item-/chat/client-side-tool-responses", contextId: "ctx1" });
+    // The tool loop must not continue after a queued result.
+    expect(calls.filter((c) => c.path === "/chat/client-side-tool-responses")).toHaveLength(1);
+  });
+
+  it("sync: a 202 that is not a queued body is an error (not silently mistyped)", async () => {
+    const { Context } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      return { status: 202, body: { job_id: "j", status: "queued", request_id: "r" } };
+    });
+    const ctx = await Context.create("a1");
+    const err = await ctx.invoke().catch((e) => e);
+    expect(err).toBeInstanceOf(AjentifyError);
+    expect(err.status).toBe(202);
+  });
+
+  it("poll: a job whose result is {status:'queued'} resolves to a QueuedResponse", async () => {
+    const { Context, calls } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      if (call.path === "/chat/invoke") {
+        return { status: 202, body: { job_id: "job-1", status: "queued", request_id: "r1" } };
+      }
+      if (call.path === "/job/job-1") {
+        return { body: { job_id: "job-1", status: "completed", result: queued({ item_id: null }) } };
+      }
+      throw new Error(`unexpected ${call.path}`);
+    });
+    const ctx = await Context.create("a1");
+    const res = await ctx.invoke({ strategy: "poll", pollIntervalMs: 1, clientSideTools: { t: async () => "" } });
+    expect(isQueued(res)).toBe(true);
+    expect(res).toEqual({ status: "queued", itemId: null, contextId: "ctx1" });
+    expect(calls.some((c) => c.path === "/chat/client-side-tool-responses")).toBe(false);
+  });
+
+  it("poll: a 202 that is already the queued body (no job) is returned directly", async () => {
+    const { Context, calls } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      if (call.path === "/chat") return { status: 202, body: queued() };
+      throw new Error(`unexpected ${call.path}`);
+    });
+    const ctx = await Context.create("a1");
+    const res = await ctx.addMessageAndInvoke("hi", { strategy: "poll", pollIntervalMs: 1 });
+    expect(res).toEqual({ status: "queued", itemId: "item-1", contextId: "ctx1" });
+    expect(calls.some((c) => c.path.startsWith("/job/"))).toBe(false);
+  });
+
+  it("the tool loop stops and returns QueuedResponse when a mid-loop turn is queued", async () => {
+    const handler = vi.fn(async () => "done");
+    const { Context, calls } = sdk((call) => {
+      if (call.path === "/context") return { body: context };
+      if (call.path === "/chat") {
+        return { body: chat({ client_side_tool_calls: [{ tool_call_id: "c1", tool_name: "t", tool_input: {} }] }) };
+      }
+      return { status: 202, body: queued({ item_id: "item-9" }) };
+    });
+    const ctx = await Context.create("a1");
+    const res = await ctx.addMessageAndInvoke("go", { clientSideTools: { t: handler } });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ status: "queued", itemId: "item-9", contextId: "ctx1" });
+    expect(calls.filter((c) => c.path === "/chat/client-side-tool-responses")).toHaveLength(1);
+  });
+
+  it("isQueued distinguishes QueuedResponse from InvokeResponse, AsyncAck and job rows", () => {
+    expect(isQueued({ status: "queued", itemId: null, contextId: "c" })).toBe(true);
+    expect(isQueued({ status: "processing", requestId: "r", jobId: "j" })).toBe(false);
+    expect(isQueued({ id: "j", status: "queued" })).toBe(false);
+    expect(isQueued(new InvokeResponse({
+      text: "", generatedMessages: [], clientSideToolCalls: [], saved: true,
+      cost: null, contextPercentage: null, modelId: null, events: [],
+    }))).toBe(false);
+    expect(isQueued(null)).toBe(false);
+    expect(isQueued("queued")).toBe(false);
   });
 });
 

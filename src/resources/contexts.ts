@@ -6,10 +6,13 @@ import { waitForJob } from "./jobs.js";
 import {
   serializeToolResult,
   type AsyncAck,
+  type AsyncToolResponse,
+  type AsyncToolResponseAck,
   type ClientSideToolCall,
   type ClientSideToolMap,
   type ClientSideToolResponse,
   type Message,
+  type QueuedResponse,
 } from "../messages.js";
 import type {
   ApiContext,
@@ -18,8 +21,10 @@ import type {
   GetOrgContextsResponse,
   SuccessResponse,
   WireAsyncAck,
+  WireAsyncToolResponseAck,
   WireChatResponse,
   WireClientSideToolCall,
+  WireQueuedResponse,
   WireTerminatingConfig,
 } from "../types.js";
 
@@ -147,6 +152,13 @@ export class InvokeResponse {
   }
 }
 
+/**
+ * What a `sync` / `poll` invoke resolves to: the agent's turn, or a
+ * `QueuedResponse` when the context was being run by someone else (your input
+ * was queued and will be applied by that run). Narrow with `isQueued()`.
+ */
+export type InvokeResult = InvokeResponse | QueuedResponse;
+
 export interface CallbackResult<T = unknown> {
   requestId: string;
   statusCode: number;
@@ -179,15 +191,22 @@ export interface Context {
   /** The cached message stack (as of the last create/get/refresh/mutation). */
   readonly messages: Message[];
 
+  /**
+   * Add a human message and run the agent. Resolves to an `InvokeResponse`, or
+   * a `QueuedResponse` if the context was being run by someone else (see
+   * `isQueued`); with `callbackUrl` / the `webhook` strategy, an `AsyncAck`.
+   */
   addMessageAndInvoke(
     text: string,
     options: InvokeOptions & { callbackUrl: string },
   ): Promise<AsyncAck>;
-  addMessageAndInvoke(text: string, options?: InvokeOptions): Promise<InvokeResponse>;
+  addMessageAndInvoke(text: string, options?: InvokeOptions): Promise<InvokeResult>;
 
+  /** Run the agent on the current message stack. Same result contract as `addMessageAndInvoke`. */
   invoke(options: InvokeOptions & { callbackUrl: string }): Promise<AsyncAck>;
-  invoke(options?: InvokeOptions): Promise<InvokeResponse>;
+  invoke(options?: InvokeOptions): Promise<InvokeResult>;
 
+  /** Insert / generate an AI message. Same result contract as `addMessageAndInvoke`. */
   addAiMessage(
     input: string | { prompt: string } | { message: string },
     options: InvokeOptions & { callbackUrl: string },
@@ -195,18 +214,26 @@ export interface Context {
   addAiMessage(
     input: string | { prompt: string } | { message: string },
     options?: InvokeOptions,
-  ): Promise<InvokeResponse>;
+  ): Promise<InvokeResult>;
 
   /**
    * Submit client-side tool results and continue the agent. With `options`
    * (e.g. `clientSideTools`, `strategy`) the auto loop resumes from here;
    * without them it is a single round-trip and the result may again
-   * `needsClientSideTools`.
+   * `needsClientSideTools`. May resolve to a `QueuedResponse` (see `isQueued`).
    */
   submitToolResponses(
     responses: ClientSideToolResponse[],
     options?: Omit<InvokeOptions, "save" | "callbackUrl" | "callbackToken" | "requestId">,
-  ): Promise<InvokeResponse>;
+  ): Promise<InvokeResult>;
+
+  /**
+   * Deliver the result of an **async tool** call (`isAsync` tools return an
+   * acknowledgement immediately; the real result arrives later via this call).
+   * The response is queued on the context's inbox and the context is run
+   * automatically to process it — no re-invoke needed.
+   */
+  asyncToolResponse(response: AsyncToolResponse): Promise<AsyncToolResponseAck>;
 
   /** Append messages to the context (e.g. commit an approved draft). */
   addMessages(messages: Message[]): Promise<Context>;
@@ -266,11 +293,11 @@ class ContextImpl implements Context {
     text: string,
     options: InvokeOptions & { callbackUrl: string },
   ): Promise<AsyncAck>;
-  addMessageAndInvoke(text: string, options?: InvokeOptions): Promise<InvokeResponse>;
+  addMessageAndInvoke(text: string, options?: InvokeOptions): Promise<InvokeResult>;
   addMessageAndInvoke(
     text: string,
     options?: InvokeOptions,
-  ): Promise<InvokeResponse | AsyncAck> {
+  ): Promise<InvokeResult | AsyncAck> {
     const body: Record<string, unknown> = {
       context_id: this.id,
       message: text,
@@ -280,8 +307,8 @@ class ContextImpl implements Context {
   }
 
   invoke(options: InvokeOptions & { callbackUrl: string }): Promise<AsyncAck>;
-  invoke(options?: InvokeOptions): Promise<InvokeResponse>;
-  invoke(options?: InvokeOptions): Promise<InvokeResponse | AsyncAck> {
+  invoke(options?: InvokeOptions): Promise<InvokeResult>;
+  invoke(options?: InvokeOptions): Promise<InvokeResult | AsyncAck> {
     const body: Record<string, unknown> = {
       context_id: this.id,
       save_ai_messages: options?.save ?? true,
@@ -296,11 +323,11 @@ class ContextImpl implements Context {
   addAiMessage(
     input: string | { prompt: string } | { message: string },
     options?: InvokeOptions,
-  ): Promise<InvokeResponse>;
+  ): Promise<InvokeResult>;
   addAiMessage(
     input: string | { prompt: string } | { message: string },
     options?: InvokeOptions,
-  ): Promise<InvokeResponse | AsyncAck> {
+  ): Promise<InvokeResult | AsyncAck> {
     const body: Record<string, unknown> = {
       context_id: this.id,
       save_ai_messages: options?.save ?? true,
@@ -318,7 +345,7 @@ class ContextImpl implements Context {
   async submitToolResponses(
     responses: ClientSideToolResponse[],
     options: Omit<InvokeOptions, "save" | "callbackUrl" | "callbackToken" | "requestId"> = {},
-  ): Promise<InvokeResponse> {
+  ): Promise<InvokeResult> {
     const wire = responses.map((r) => ({
       tool_call_id: r.toolCallId,
       response: serializeToolResult(r.response),
@@ -329,6 +356,10 @@ class ContextImpl implements Context {
       options,
     );
     return this.runClientLoop(resp, options);
+  }
+
+  asyncToolResponse(response: AsyncToolResponse): Promise<AsyncToolResponseAck> {
+    return postAsyncToolResponse(this.client, this.id, response);
   }
 
   async addMessages(messages: Message[]): Promise<Context> {
@@ -367,7 +398,7 @@ class ContextImpl implements Context {
     path: string,
     body: Record<string, unknown>,
     options: InvokeOptions,
-  ): Promise<InvokeResponse | AsyncAck> {
+  ): Promise<InvokeResult | AsyncAck> {
     const payload = { ...body };
     if (options.terminating) payload.terminating_config = toWireTerminating(options.terminating);
 
@@ -395,27 +426,40 @@ class ContextImpl implements Context {
    * Run one model turn and return its ChatResponse, honouring the strategy:
    * `sync` keeps the request open; `poll` asks for a job and waits on it (and
    * transparently accepts a 200 if the route answered synchronously anyway).
+   *
+   * Either way the turn may come back *queued* (`WireQueuedResponse`): the
+   * context was being run by someone else, so the input was placed on its inbox
+   * for that run to apply. `sync` signals this with HTTP 202; `poll` with a job
+   * whose `result` is the queued object.
    */
   private async turn(
     path: string,
     payload: Record<string, unknown>,
     options: Pick<InvokeOptions, "strategy" | "pollIntervalMs" | "signal" | "callbackUrl">,
-  ): Promise<WireChatResponse> {
+  ): Promise<WireChatResponse | WireQueuedResponse> {
     const signal = options.signal;
     if (resolveStrategy(options) !== "poll") {
-      return this.client.post<WireChatResponse>(path, payload, { signal });
+      const { status, data } = await this.client.requestWithStatus<WireChatResponse | WireQueuedResponse>(
+        "POST",
+        path,
+        { body: payload, signal },
+      );
+      if (status === 202 && !isWireQueued(data)) {
+        throw new AjentifyError(`Unexpected 202 from ${path}`, { status, body: data });
+      }
+      return data;
     }
-    const { status, data } = await this.client.requestWithStatus<WireChatResponse | WireAsyncAck>(
-      "POST",
-      path,
-      { body: payload, preferAsync: true, signal },
-    );
+    const { status, data } = await this.client.requestWithStatus<
+      WireChatResponse | WireAsyncAck | WireQueuedResponse
+    >("POST", path, { body: payload, preferAsync: true, signal });
     if (status !== 202) return data as WireChatResponse;
+    // A 202 is normally the job ack; if the route short-circuited to "queued" it is that instead.
+    if (isWireQueued(data)) return data;
     const ack = data as WireAsyncAck;
     if (!ack.job_id) {
       throw new AjentifyError(`Async dispatch of ${path} returned no job_id`, { status, body: data });
     }
-    const job = await waitForJob<WireChatResponse>(this.client, ack.job_id, {
+    const job = await waitForJob<WireChatResponse | WireQueuedResponse>(this.client, ack.job_id, {
       intervalMs: options.pollIntervalMs,
       signal,
     });
@@ -432,12 +476,13 @@ class ContextImpl implements Context {
   }
 
   private async runClientLoop(
-    first: WireChatResponse,
+    first: WireChatResponse | WireQueuedResponse,
     options: Omit<InvokeOptions, "save" | "callbackUrl" | "callbackToken" | "requestId">,
-  ): Promise<InvokeResponse> {
+  ): Promise<InvokeResult> {
+    if (isWireQueued(first)) return mapQueued(first);
     const handlers = options.clientSideTools ?? {};
     const exitOn = new Set(options.exitOn ?? []);
-    let current = first;
+    let current: WireChatResponse = first;
     const generated: Message[] = [...(first.generated_messages ?? [])];
     let cost = first.invocation_cost ?? 0;
 
@@ -465,17 +510,47 @@ class ContextImpl implements Context {
         });
       }
 
-      current = await this.turn(
+      const next = await this.turn(
         "/chat/client-side-tool-responses",
         { context_id: this.id, tool_responses: toolResponses },
         options,
       );
+      // Mid-loop the context can be taken over by another run; our tool responses were
+      // queued for it, so hand back the QueuedResponse (messages so far are on the context).
+      if (isWireQueued(next)) return mapQueued(next);
+      current = next;
       generated.push(...(current.generated_messages ?? []));
       cost += current.invocation_cost ?? 0;
     }
 
     return buildInvokeResponse(current, generated, cost);
   }
+}
+
+function isWireQueued(data: unknown): data is WireQueuedResponse {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { status?: unknown }).status === "queued" &&
+    typeof (data as { context_id?: unknown }).context_id === "string"
+  );
+}
+
+function mapQueued(wire: WireQueuedResponse): QueuedResponse {
+  return { status: "queued", itemId: wire.item_id ?? null, contextId: wire.context_id };
+}
+
+async function postAsyncToolResponse(
+  client: AjentifyClient,
+  contextId: string,
+  response: AsyncToolResponse,
+): Promise<AsyncToolResponseAck> {
+  const ack = await client.post<WireAsyncToolResponseAck>("/async-tool-response", {
+    context_id: contextId,
+    tool_call_id: response.toolCallId,
+    response: serializeToolResult(response.response),
+  });
+  return { status: "triggered", itemId: ack.item_id };
 }
 
 function resolveStrategy(options: Pick<InvokeOptions, "strategy" | "callbackUrl">): InvokeStrategy {
@@ -507,6 +582,11 @@ export interface ContextApi {
   list(
     options?: ContextListOptions,
   ): Promise<{ contexts: ApiOrgContextSummary[]; nextCursor: string | null }>;
+  /**
+   * Deliver the result of an async tool call without loading the context first
+   * (`POST /async-tool-response`). The context is run automatically to process it.
+   */
+  asyncToolResponse(contextId: string, response: AsyncToolResponse): Promise<AsyncToolResponseAck>;
 }
 
 export function createContextApi(getClient: GetClient): ContextApi {
@@ -542,6 +622,10 @@ export function createContextApi(getClient: GetClient): ContextApi {
       if (options.cursor) query.cursor = options.cursor;
       const res = await client.get<GetOrgContextsResponse>("/org-contexts", { query });
       return { contexts: res.contexts, nextCursor: res.next_cursor ?? null };
+    },
+
+    asyncToolResponse(contextId, response) {
+      return postAsyncToolResponse(getClient(), contextId, response);
     },
   };
 }

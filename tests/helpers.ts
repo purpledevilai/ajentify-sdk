@@ -1,3 +1,11 @@
+import { InvokeResponse, isQueued, type InvokeResult } from "../src/index.js";
+
+/** Narrow an invoke result to the InvokeResponse branch (fails loudly if the context was busy). */
+export function invoked(result: InvokeResult): InvokeResponse {
+  if (isQueued(result)) throw new Error(`expected an InvokeResponse, got queued ${JSON.stringify(result)}`);
+  return result;
+}
+
 export interface MockCall {
   url: string;
   path: string;
