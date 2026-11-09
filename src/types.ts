@@ -65,6 +65,48 @@ export interface GetToolsResponse {
   tools: ApiTool[];
 }
 
+export interface ApiMCPTool {
+  name: string;
+  description?: string | null;
+  input_schema?: Record<string, unknown>;
+  output_schema?: Record<string, unknown> | null;
+}
+
+export interface ApiMCPConnection {
+  mcp_connection_id: string;
+  org_id: string;
+  name: string;
+  mcp_url: string;
+  requires_auth: boolean;
+  access_token?: string | null;
+  refresh_token?: string | null;
+  token_endpoint?: string | null;
+  client_id?: string | null;
+  issuer?: string | null;
+  selected_tools: ApiMCPTool[];
+  stage_id?: string | null;
+  logical_name?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CreateMCPConnectionParams {
+  org_id?: string;
+  name: string;
+  mcp_url: string;
+  requires_auth?: boolean;
+  access_token?: string | null;
+  refresh_token?: string | null;
+  token_endpoint?: string | null;
+  client_id?: string | null;
+  issuer?: string | null;
+  selected_tools?: ApiMCPTool[];
+}
+
+export interface GetMCPConnectionsResponse {
+  mcp_connections: ApiMCPConnection[];
+}
+
 export interface ApiDefaultTool {
   tool_id: string;
   name: string;
@@ -94,6 +136,7 @@ export interface ApiAgent {
   is_default_agent: boolean;
   agent_speaks_first?: boolean;
   tools?: string[];
+  mcp_connections?: string[];
   uses_prompt_args?: boolean;
   prompt_arg_names?: string[];
   voice_id?: string | null;
@@ -114,6 +157,7 @@ export interface CreateAgentParams {
   is_public?: boolean;
   agent_speaks_first?: boolean;
   tools?: string[];
+  mcp_connections?: string[];
   uses_prompt_args?: boolean;
   prompt_arg_names?: string[];
   voice_id?: string | null;
@@ -192,6 +236,12 @@ export interface ApiAPIKey {
   created_at: number;
   updated_at: number;
   expires_at?: number | null;
+}
+
+export interface ApiClient {
+  client_id: string;
+  org_id: string;
+  created_at: number;
 }
 
 export interface GetAPIKeysResponse {
@@ -296,9 +346,147 @@ export interface WireChatResponse {
   client_side_tool_calls?: WireClientSideToolCall[] | null;
 }
 
-export interface WireAsyncAck {
-  status: "processing";
+/** The 202 body of an async-dispatched request: the job row + request_id (+ poll_url when authenticated). */
+export interface WireAsyncAck extends Partial<ApiJob> {
   request_id: string;
+  poll_url?: string;
+}
+
+/**
+ * The 202 body of a chat route whose context is being run by someone else: the input was
+ * queued on the context's inbox and the current run holder will apply it. Also the job
+ * `result` when such a route ran as an async job.
+ */
+export interface WireQueuedResponse {
+  status: "queued";
+  /** `null` for `/chat/invoke`, which queues nothing. */
+  item_id: string | null;
+  context_id: string;
+}
+
+/** The 200 body of `POST /async-tool-response`. */
+export interface WireAsyncToolResponseAck {
+  status: "triggered";
+  item_id: string;
+}
+
+export interface ApiJobError {
+  status_code: number;
+  message: string;
+  code?: string | null;
+}
+
+export interface ApiJob {
+  job_id: string;
+  owner_id?: string;
+  status: "queued" | "in_progress" | "completed" | "error";
+  message?: string | null;
+  data?: Record<string, unknown> | null;
+  route?: string | null;
+  method?: string | null;
+  request_id?: string | null;
+  callback_url?: string | null;
+  result?: unknown;
+  error?: ApiJobError | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+  expires_at?: number | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+// --- Filesystems ---------------------------------------------------------------
+
+export interface ApiFilesystem {
+  filesystem_id: string;
+  org_id: string;
+  name: string;
+  description?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GetFilesystemsResponse {
+  filesystems: ApiFilesystem[];
+}
+
+export interface ApiFilesystemTreeNode {
+  path: string;
+  type: "folder" | "file";
+  name: string;
+  parent_path: string;
+  description?: string | null;
+  size_bytes?: number | null;
+  updated_at?: number | null;
+}
+
+export interface ApiFilesystemTree {
+  filesystem_id: string;
+  name: string;
+  description?: string | null;
+  nodes: ApiFilesystemTreeNode[];
+}
+
+export interface ApiFolderChild {
+  name: string;
+  path: string;
+  type: "folder" | "file";
+  description?: string | null;
+  size_bytes?: number | null;
+}
+
+export interface ApiFolderNode {
+  type: "folder";
+  path: string;
+  name: string;
+  parent_path: string;
+  description?: string | null;
+  size_bytes?: number | null;
+  created_at?: number | null;
+  updated_at?: number | null;
+  children?: ApiFolderChild[];
+  parents_created?: string[] | number | null;
+}
+
+export interface ApiFileNode {
+  type: "file";
+  path: string;
+  name: string;
+  parent_path: string;
+  content?: string;
+  size_bytes?: number | null;
+  created_at?: number | null;
+  updated_at?: number | null;
+  parents_created?: string[] | number | null;
+}
+
+export type ApiFilesystemNode = ApiFolderNode | ApiFileNode;
+
+export interface ApiFilesystemMoveResult {
+  source_path: string;
+  destination_path: string;
+  type: "folder" | "file";
+  parents_created?: string[] | number | null;
+}
+
+export interface ApiFilesystemDeleteResult {
+  path: string;
+  type: "folder" | "file";
+  deleted: { folders: number; files: number };
+}
+
+export interface ApiFilesystemSearchMatch {
+  path: string;
+  type: "folder" | "file";
+  matched_on: string;
+  snippet?: string | null;
+}
+
+export interface ApiFilesystemSearchResult {
+  query: string;
+  path: string;
+  matches: ApiFilesystemSearchMatch[];
+  truncated: boolean;
 }
 
 export interface WireTerminatingConfig {
