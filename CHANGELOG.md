@@ -3,6 +3,27 @@
 All notable changes to `@ajentify/sdk` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow semver (pre-1.0: minor bumps may break).
 
+## [0.4.0] — 2026-11-18
+
+### Added
+- **`applyEdits(text, edits)`** — the platform-wide anchored `edits` contract (`replace` / `insert_before` /
+  `insert_after` / `delete`; each `target` / `anchor` must occur exactly once; ordered, all-or-nothing), mirrored
+  byte-for-byte from the API's `Lib/TextEdits.py` (and shared with `@ajentify/chat` / `@ajentify/voice`). Returns
+  `{ text, summary }`; throws **`TextEditError`** (`code`: `empty_edits` | `invalid_edit` | `target_not_found` |
+  `ambiguous_target`, plus `details` with `edit_index`, `match_count`, `contexts`). Also exported: **`EDITS_SCHEMA`**
+  (canonical JSON Schema of an `edits` parameter), `EDITS_FIELD_DESCRIPTION`, `EDIT_OPERATIONS`, `validateEdit`,
+  types `EditOperation`, `EditSummary`.
+- **`Schedule`** resource over `/schedule*`: `Schedule.create({ agentId, scheduleExpression, timezone?, message?,
+  promptArgs?, enabled?, name? })`, `Schedule.get(id)`, `Schedule.list({ agentId } | { orgId })`,
+  `Schedule.update(id, …)` / `schedule.update(…)` (partial; `null` clears `name` / `message` / `promptArgs`),
+  `Schedule.delete(id)` / `schedule.delete()`, and **`schedule.runNow()`** (`POST /schedule/{id}/run` is always a
+  job: polls it and resolves `{ schedule, contextId }`; `{ wait: false }` returns the queued `Job` instead).
+- **`PhoneNumber`** resource over `/phone-number*`: `PhoneNumber.create({ orgId, phoneNumber, twilioAuthToken,
+  agentId?, friendlyName?, twilioAccountSid? })` (BYO Twilio numbers), `PhoneNumber.get(id)`,
+  `PhoneNumber.list({ orgId } | { agentId })`, `phoneNumber.update({ agentId: string | null, friendlyName?,
+  twilioAuthToken?, twilioAccountSid? })` (`agentId: null` detaches), `phoneNumber.delete()`. The Twilio auth token
+  is never returned; `hasTwilioAuthToken` says whether one is stored.
+
 ## [0.3.0] — 2026-11-09
 
 Tracks the API's single-runner-per-context model (context inbox + run lease).

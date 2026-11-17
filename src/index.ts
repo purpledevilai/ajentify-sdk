@@ -44,6 +44,16 @@ import {
   type Filesystem as FilesystemInstance,
   type FilesystemApi,
 } from "./resources/filesystems.js";
+import {
+  createScheduleApi,
+  type Schedule as ScheduleInstance,
+  type ScheduleApi,
+} from "./resources/schedules.js";
+import {
+  createPhoneNumberApi,
+  type PhoneNumber as PhoneNumberInstance,
+  type PhoneNumberApi,
+} from "./resources/phoneNumbers.js";
 
 /** The full set of resource namespaces bound to a single client. */
 export interface AjentifyNamespaces {
@@ -60,6 +70,8 @@ export interface AjentifyNamespaces {
   MCPConnection: MCPConnectionApi;
   Job: JobApi;
   Filesystem: FilesystemApi;
+  Schedule: ScheduleApi;
+  PhoneNumber: PhoneNumberApi;
 }
 
 function bindNamespaces(getClient: GetClient, client: AjentifyClient): AjentifyNamespaces {
@@ -77,6 +89,8 @@ function bindNamespaces(getClient: GetClient, client: AjentifyClient): AjentifyN
     MCPConnection: createMCPConnectionApi(getClient),
     Job: createJobApi(getClient),
     Filesystem: createFilesystemApi(getClient),
+    Schedule: createScheduleApi(getClient),
+    PhoneNumber: createPhoneNumberApi(getClient),
   };
 }
 
@@ -103,6 +117,8 @@ export const Models = createModelsApi(getDefaultClient);
 export const MCPConnection = createMCPConnectionApi(getDefaultClient);
 export const Job = createJobApi(getDefaultClient);
 export const Filesystem = createFilesystemApi(getDefaultClient);
+export const Schedule = createScheduleApi(getDefaultClient);
+export const PhoneNumber = createPhoneNumberApi(getDefaultClient);
 
 /** Parse an async callback POST body into a structured result. */
 export const parseCallback = parseCallbackImpl;
@@ -119,6 +135,8 @@ export type DataWindow = DataWindowInstance;
 export type JsonDocument = JsonDocumentInstance;
 export type MCPConnection = MCPConnectionInstance;
 export type Filesystem = FilesystemInstance;
+export type Schedule = ScheduleInstance;
+export type PhoneNumber = PhoneNumberInstance;
 
 /** Aggregate namespace for those who prefer a single import. */
 export const AJ = {
@@ -134,6 +152,8 @@ export const AJ = {
   MCPConnection,
   Job,
   Filesystem,
+  Schedule,
+  PhoneNumber,
   parseCallback,
   isQueued,
   configure,
@@ -147,6 +167,21 @@ export { AjentifyClient, DEFAULT_BASE_URL } from "./client.js";
 export type { AjentifyClientOptions, RequestOptions, CallbackConfig, StatusResponse } from "./client.js";
 export { AjentifyError } from "./errors.js";
 export type { AjentifyErrorDetails } from "./errors.js";
+
+// --- Text edits (the platform-wide `edits` contract) -------------------------
+
+export {
+  applyEdits,
+  validateEdit,
+  TextEditError,
+  EDIT_OPERATIONS,
+  EDITS_SCHEMA,
+  EDITS_FIELD_DESCRIPTION,
+  EDITS_TYPE_MARKER,
+  EDIT_CONTEXT_CHARS,
+  MAX_AMBIGUOUS_CONTEXTS,
+} from "./textEdits.js";
+export type { EditOperation, EditOperationName, EditSummary, TextEditErrorCode } from "./textEdits.js";
 
 // --- Shared types ------------------------------------------------------------
 
@@ -242,3 +277,20 @@ export type {
   MCPConnectionUpdateOptions,
   MCPTool,
 } from "./resources/mcpConnections.js";
+export type {
+  ScheduleApi,
+  ScheduleCreateOptions,
+  ScheduleUpdateOptions,
+  ScheduleListOptions,
+  ScheduleRunOptions,
+  ScheduleRunResult,
+  ScheduleRunJob,
+  ScheduleRunStatus,
+} from "./resources/schedules.js";
+export type {
+  PhoneNumberApi,
+  PhoneNumberCreateOptions,
+  PhoneNumberUpdateOptions,
+  PhoneNumberListOptions,
+  PhoneNumberOwnership,
+} from "./resources/phoneNumbers.js";
