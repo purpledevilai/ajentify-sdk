@@ -489,6 +489,62 @@ export interface ApiFilesystemSearchResult {
   truncated: boolean;
 }
 
+// --- Schedules -----------------------------------------------------------------
+
+export interface ApiSchedule {
+  schedule_id: string;
+  org_id: string;
+  agent_id: string;
+  name?: string | null;
+  schedule_expression: string;
+  timezone: string;
+  enabled: boolean;
+  prompt_args?: Record<string, unknown> | null;
+  message?: string | null;
+  created_by: string;
+  client_id: string;
+  created_at: number;
+  updated_at: number;
+  run_count?: number;
+  last_run_at?: number | null;
+  last_context_id?: string | null;
+  last_status?: "ok" | "error" | null;
+  last_error?: string | null;
+}
+
+export interface GetSchedulesResponse {
+  schedules: ApiSchedule[];
+}
+
+/** The job `result` of `POST /schedule/{id}/run`. */
+export interface ApiRunScheduleResponse {
+  schedule: ApiSchedule;
+  context_id: string;
+}
+
+// --- Phone numbers (telephony) -------------------------------------------------
+
+/** A phone number as the API returns it: never carries `twilio_auth_token`. */
+export interface ApiPhoneNumber {
+  phone_number_id: string;
+  org_id: string;
+  phone_number: string;
+  provider: string;
+  ownership: "ajentify" | "byo";
+  agent_id?: string | null;
+  friendly_name?: string | null;
+  twilio_account_sid?: string | null;
+  twilio_phone_number_sid?: string | null;
+  has_twilio_auth_token?: boolean;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GetPhoneNumbersResponse {
+  phone_numbers: ApiPhoneNumber[];
+}
+
 export interface WireTerminatingConfig {
   tool_ids?: string[];
   consecutive_nudges?: number;

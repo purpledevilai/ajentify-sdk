@@ -1,6 +1,6 @@
 # @ajentify/sdk
 
-The official TypeScript SDK for the [Ajentify](https://ajentify.com) API. A clean, uniform wrapper over every Ajentify primitive — agents, contexts, tools, filesystems, structured responses, data windows, API keys, JSON documents, jobs and models — with Zod-first schemas and no `ParameterDefinition` / stage plumbing in sight.
+The official TypeScript SDK for the [Ajentify](https://ajentify.com) API. A clean, uniform wrapper over every Ajentify primitive — agents, contexts, tools, filesystems, schedules, phone numbers, structured responses, data windows, API keys, JSON documents, jobs and models — with Zod-first schemas and no `ParameterDefinition` / stage plumbing in sight.
 
 ```ts
 import { Agent, Context, isQueued } from "@ajentify/sdk";
@@ -78,6 +78,42 @@ const addNumbers = await Tools.create("addNumbers", z.object({ a: z.number(), b:
 await Tools.list();
 await Tools.defaults(); // built-in platform tools
 ```
+
+### Text edits (`applyEdits`)
+
+Agents edit text — prompts, files, a page — with the platform-wide **`edits`** contract: an ordered, all-or-nothing list of anchored operations (`replace` / `insert_before` / `insert_after` / `delete`) whose `target` / `anchor` must occur exactly once. The same algorithm runs server-side (`edit_file`, `update_system_prompt`, `aj_apply_edits` in custom-code tools); `applyEdits` is the identical client-side implementation, so a client-side tool can take an `edits` parameter and apply it to text it owns:
+
+```ts
+import { Tools, applyEdits, EDITS_SCHEMA, TextEditError } from "@ajentify/sdk";
+
+// Declare the tool with the canonical `edits` schema (raw JSON Schema is fine).
+const editDraft = await Tools.create(
+  "editDraft",
+  { type: "object", required: ["edits"], properties: { edits: EDITS_SCHEMA } },
+  { isClientSide: true },
+);
+
+let draft = "Dear customer,\n\nThanks for reaching out.\n";
+
+await context.addMessageAndInvoke("Make the greeting warmer", {
+  clientSideTools: {
+    editDraft: async ({ edits }) => {
+      try {
+        const { text, summary } = applyEdits(draft, edits);
+        draft = text;
+        return `Applied ${summary.replaced + summary.inserted_before + summary.inserted_after + summary.deleted} edit(s).`;
+      } catch (err) {
+        // target_not_found / ambiguous_target / invalid_edit / empty_edits — hand the
+        // message back so the agent can retry with a more specific target.
+        if (err instanceof TextEditError) return `Edit failed (${err.code}): ${err.message}`;
+        throw err;
+      }
+    },
+  },
+});
+```
+
+`applyEdits(text, edits)` returns `{ text, summary }` and never mutates its input; on failure it throws `TextEditError` with `code`, `message` and `details` (`edit_index`, `match_count`, and up to three `contexts` around an ambiguous match). `EDITS_FIELD_DESCRIPTION` is a one-line description of the shape for tool parameter docs.
 
 ## MCP connections
 
@@ -303,6 +339,57 @@ await fs.tree();
 
 // Hand the agent its working folder as a prompt argument:
 await Context.create(agent.id, { promptArgs: { ARG_FOLDER: fs.toolPath("/companies/acme") } });
+```
+
+## Schedules
+
+A schedule invokes an agent on a timer (Amazon EventBridge Scheduler syntax: `rate(...)`, `cron(...)` or a one-shot `at(...)`). Every fire creates a new context for the agent, with the schedule's `promptArgs` and optional kick-off `message`.
+
+```ts
+import { Schedule } from "@ajentify/sdk";
+
+const digest = await Schedule.create({
+  agentId: agent.id,
+  name: "Morning digest",
+  scheduleExpression: "cron(0 9 ? * MON-FRI *)",
+  timezone: "Australia/Melbourne",
+  promptArgs: { ARG_TOPIC: "AI news" },
+  message: "Good morning — please prepare today's digest.",
+});
+
+await Schedule.list({ agentId: agent.id }); // or { orgId }
+await digest.update({ enabled: false });  // partial; `message: null` / `promptArgs: null` clear them
+
+// Run it now, exactly as a fire would. The route is always a job: by default the SDK
+// polls it and resolves with the updated schedule + the context the run created.
+const { schedule, contextId } = await digest.runNow({ signal: AbortSignal.timeout(5 * 60_000) });
+const job = await digest.runNow({ wait: false }); // or take the queued Job and poll it yourself
+
+await digest.delete();
+```
+
+`schedule.runCount`, `lastRunAt`, `lastContextId`, `lastStatus` (`"ok" | "error"`) and `lastError` carry the run bookkeeping.
+
+## Phone numbers
+
+Route incoming Twilio calls to a **realtime** agent. Register your own number (ownership `byo`) with the Twilio auth token Ajentify uses to verify Twilio's request signature — the token is stored, never returned (`hasTwilioAuthToken` tells you one is set).
+
+```ts
+import { PhoneNumber } from "@ajentify/sdk";
+
+const line = await PhoneNumber.create({
+  orgId: agent.orgId,
+  phoneNumber: "+61481613228",
+  twilioAuthToken: process.env.TWILIO_AUTH_TOKEN!,
+  agentId: realtimeAgent.id,
+  friendlyName: "Support line",
+});
+// Then point the number's Voice webhook at https://api.ajentify.com/telephony/twilio/voice (HTTP POST).
+
+await PhoneNumber.list({ orgId: agent.orgId }); // or { agentId }
+await line.update({ agentId: otherRealtimeAgent.id }); // attach
+await line.update({ agentId: null });                  // detach (calls get the rejection message)
+await line.delete();                                   // the number stays in your Twilio account
 ```
 
 ## Structured responses
